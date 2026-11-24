@@ -1,6 +1,7 @@
 import React from 'react';
+import { useLanguage } from '../context/LanguageContext';
 
-export type ActiveTab = 'chat' | 'arsenal' | 'forms' | 'lore';
+export type ActiveTab = 'chat' | 'field' | 'arsenal' | 'forms' | 'lore';
 
 interface TopBarProps {
   activeTab: ActiveTab;
@@ -8,18 +9,21 @@ interface TopBarProps {
   onOpenScenarioModal: () => void;
 }
 
-const NAV_ITEMS: { id: ActiveTab; label: string }[] = [
-  { id: 'chat', label: 'Conversation' },
-  { id: 'arsenal', label: 'Arsenal' },
-  { id: 'forms', label: 'Forms & Plates' },
-  { id: 'lore', label: 'Lore Book' },
-];
-
 export const TopBar: React.FC<TopBarProps> = ({
   activeTab,
   onSelectTab,
   onOpenScenarioModal,
 }) => {
+  const { t } = useLanguage();
+
+  const navItems: { id: ActiveTab; label: string }[] = [
+    { id: 'chat', label: t.navConversation },
+    { id: 'field', label: t.navField },
+    { id: 'arsenal', label: t.navArsenal },
+    { id: 'forms', label: t.navForms },
+    { id: 'lore', label: t.navLore },
+  ];
+
   return (
     <header className="sticky top-0 z-30 border-b border-[var(--border-subtle)] bg-[var(--bg-header)] backdrop-blur-md transition-colors duration-200">
       <div className="mx-auto flex max-w-[1360px] items-center justify-between gap-8 px-4 py-3 sm:px-6 lg:px-8">
@@ -29,7 +33,7 @@ export const TopBar: React.FC<TopBarProps> = ({
           onClick={() => onSelectTab('chat')}
           className="font-display text-lg font-bold tracking-tight text-[var(--text-primary)] whitespace-nowrap shrink-0 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-red-500 cursor-pointer"
         >
-          The Anomalous Eevee
+          {t.appTitle}
         </button>
 
         {/* Zone 2: Clean Single-Line Navigation Links */}
@@ -37,7 +41,7 @@ export const TopBar: React.FC<TopBarProps> = ({
           aria-label="Primary navigation"
           className="hidden md:flex items-center gap-7 text-sm font-medium"
         >
-          {NAV_ITEMS.map((item) => {
+          {navItems.map((item) => {
             const isActive = activeTab === item.id;
             return (
               <button
@@ -69,7 +73,7 @@ export const TopBar: React.FC<TopBarProps> = ({
             onClick={onOpenScenarioModal}
             className="min-h-[40px] rounded-lg bg-red-600 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-red-500 active:bg-red-700 whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-400"
           >
-            New Scene
+            {t.btnNewScene}
           </button>
         </div>
       </div>
@@ -79,7 +83,7 @@ export const TopBar: React.FC<TopBarProps> = ({
         aria-label="Mobile navigation"
         className="flex md:hidden items-center gap-5 overflow-x-auto border-t border-[var(--border-subtle)] px-4 py-2 text-xs font-medium"
       >
-        {NAV_ITEMS.map((item) => {
+        {navItems.map((item) => {
           const isActive = activeTab === item.id;
           return (
             <button

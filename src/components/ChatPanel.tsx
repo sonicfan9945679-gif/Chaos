@@ -9,6 +9,7 @@ import {
   X,
 } from 'lucide-react';
 import { motion } from 'motion/react';
+import { useLanguage } from '../context/LanguageContext';
 import {
   ARSENAL_MOVES,
   SCENARIOS,
@@ -54,6 +55,7 @@ interface ChatPanelProps {
   onSendMessage: () => void;
   onSelectScenario: (id: ScenarioId) => void;
   onRetryLast: () => void;
+  modeSwitcher?: React.ReactNode;
 }
 
 function formatBytes(bytes: number): string {
@@ -107,11 +109,13 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   onSendMessage,
   onSelectScenario,
   onRetryLast,
+  modeSwitcher,
 }) => {
   const threadEndRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [lightboxImage, setLightboxImage] = useState<{ url: string; name: string } | null>(null);
+  const { language, t } = useLanguage();
 
   const phaseInfo = TIME_PHASES[activePhase];
 
@@ -190,35 +194,39 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
       <div className="flex flex-wrap items-center justify-between gap-4 border-b border-[var(--border-subtle)] px-5 py-3.5">
         <div className="flex flex-col gap-0.5">
           <h1 className="font-display text-base font-bold text-[var(--text-primary)]">
-            Active Scene: {scenario.label}
+            {t.chatActiveScene}: {scenario.label}
           </h1>
           <p className="text-xs text-[var(--text-muted)]">
             {scenario.setting} · {phaseInfo.label} ({localTimeDisplay})
           </p>
         </div>
 
-        <div
-          role="group"
-          aria-label="Scene selection"
-          className="flex items-center gap-1 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-canvas)] p-1"
-        >
-          {SCENARIOS.map((item) => {
-            const active = item.id === scenario.id;
-            return (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => onSelectScenario(item.id)}
-                className={`min-h-[34px] rounded-md px-3 py-1.5 text-xs font-medium whitespace-nowrap shrink-0 transition-colors cursor-pointer ${
-                  active
-                    ? 'bg-[var(--bg-subtle)] text-[var(--text-primary)]'
-                    : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'
-                }`}
-              >
-                {item.label}
-              </button>
-            );
-          })}
+        <div className="flex flex-wrap items-center gap-2.5">
+          {modeSwitcher}
+
+          <div
+            role="group"
+            aria-label="Scene selection"
+            className="flex items-center gap-1 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-canvas)] p-1"
+          >
+            {SCENARIOS.map((item) => {
+              const active = item.id === scenario.id;
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => onSelectScenario(item.id)}
+                  className={`min-h-[34px] rounded-md px-3 py-1.5 text-xs font-medium whitespace-nowrap shrink-0 transition-colors cursor-pointer ${
+                    active
+                      ? 'bg-[var(--bg-subtle)] text-[var(--text-primary)]'
+                      : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'
+                  }`}
+                >
+                  {item.label}
+                </button>
+              );
+            })}
+          </div>
         </div>
       </div>
 
@@ -273,7 +281,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
                         : 'font-semibold text-[var(--user-bubble-label)]'
                     }
                   >
-                    {isEevee ? 'The Anomalous Eevee' : 'You (Owner)'}
+                    {isEevee ? t.appTitle : t.chatYouOwner}
                   </span>
                   {isEevee && msg.form && (
                     <>
@@ -343,7 +351,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
                 )}
 
                 {msg.content && (
-                  <div className="space-y-1.5 text-[15px]">
+                  <div dir={language.direction} className="space-y-1.5 text-[15px]">
                     {renderFormattedText(msg.content)}
                   </div>
                 )}
@@ -352,7 +360,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
                   <div className="mt-3.5 flex flex-wrap items-center gap-2 border-t border-[var(--border-subtle)] pt-2.5 text-xs">
                     <Swords className="h-3.5 w-3.5 shrink-0 text-[var(--accent-text)]" />
                     <span className="font-semibold text-[var(--text-primary)]">
-                      Move Executed: {msg.moveUsed}
+                      {t.chatMoveExecuted}: {msg.moveUsed}
                     </span>
                     {moveDetails && (
                       <>
@@ -377,8 +385,11 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
 
         {isSending && (
           <div className="flex items-start">
-            <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-5 py-3.5 text-xs text-[var(--text-muted)]">
-              The Anomalous Eevee narrows his neon-red eyes and inspects everything…
+            <div
+              dir={language.direction}
+              className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-5 py-3.5 text-xs text-[var(--text-muted)]"
+            >
+              {t.chatThinking}
             </div>
           </div>
         )}
@@ -398,7 +409,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
               className="inline-flex items-center gap-1.5 rounded-md border border-red-500/30 bg-red-600 px-3 py-1.5 font-medium text-white hover:bg-red-500 cursor-pointer"
             >
               <RotateCcw className="h-3.5 w-3.5" />
-              Retry
+              {t.chatRetry}
             </button>
           </div>
         )}
@@ -476,12 +487,12 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
               type="button"
               disabled={isSending}
               onClick={() => fileInputRef.current?.click()}
-              title="Upload image or video"
-              aria-label="Upload image or video"
+              title={t.chatUploadMedia}
+              aria-label={t.chatUploadMedia}
               className="inline-flex min-h-[44px] items-center gap-2 rounded-lg border border-[var(--border-strong)] bg-[var(--bg-input)] px-3.5 py-2.5 text-xs font-medium text-[var(--text-secondary)] transition-colors hover:border-red-500/40 hover:text-[var(--text-primary)] disabled:opacity-40 whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-red-400"
             >
               <ImagePlus className="h-4 w-4 text-[var(--accent-text)]" />
-              <span className="hidden sm:inline">Upload Media</span>
+              <span className="hidden sm:inline">{t.chatUploadMedia}</span>
             </button>
 
             <div className="flex-1">
@@ -490,12 +501,13 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
               </label>
               <textarea
                 id="eevee-chat-input"
+                dir={language.direction}
                 rows={2}
                 value={inputValue}
                 onChange={(e) => onChangeInput(e.target.value)}
                 onKeyDown={handleKeyDown}
                 onPaste={handlePaste}
-                placeholder="Speak to him, or attach/drop an image or video… (Enter to send)"
+                placeholder={t.chatPlaceholder}
                 className="w-full resize-none rounded-lg border border-[var(--border-strong)] bg-[var(--bg-input)] px-4 py-2.5 text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:border-red-500 focus:outline-none"
               />
             </div>
@@ -507,7 +519,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
             className="inline-flex min-h-[44px] items-center justify-center gap-2 rounded-lg bg-red-600 px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-red-500 disabled:cursor-not-allowed disabled:opacity-40 whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-400"
           >
             <Send className="h-4 w-4" />
-            <span>Send</span>
+            <span>{t.chatSend}</span>
           </button>
         </div>
       </form>
