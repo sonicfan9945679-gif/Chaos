@@ -1,0 +1,6 @@
+{
+  "name": "The Anomalous Eevee",
+  "description": "Have a conversation with The Anomalous Eevee — a stern, talking Eevee with neon-red eyes, Arceus Plate mastery, multiple Tera Types, all 8 Eeveelutions, and a 46-move arsenal.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
