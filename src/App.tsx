@@ -1,5 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { BookMarked, BookOpen, Calculator, Globe, Sparkles, Tv, X } from 'lucide-react';
+import {
+  BookMarked,
+  BookOpen,
+  Calculator,
+  Calendar,
+  CloudSun,
+  Globe,
+  History,
+  Sparkles,
+  Tv,
+  X,
+} from 'lucide-react';
 import { useLanguage } from './context/LanguageContext';
 import { LanguageSettingsModal } from './components/LanguageSettingsModal';
 import { TopBar, type ActiveTab } from './components/TopBar';
@@ -14,6 +25,9 @@ import { YouTubeWatchPanel } from './components/YouTubeWatchPanel';
 import { NotebookLMReviewPanel } from './components/NotebookLMReviewPanel';
 import { EncyclopediaReviewPanel } from './components/EncyclopediaReviewPanel';
 import { TInspireCasPanel } from './components/TInspireCasPanel';
+import { WeatherForecastPanel } from './components/WeatherForecastPanel';
+import { DailyFactPanel } from './components/DailyFactPanel';
+import { BiographyPanel } from './components/BiographyPanel';
 import { MapCalendarWorkspace } from './components/MapCalendarWorkspace';
 import { ArsenalView } from './components/ArsenalView';
 import { FormsPlatesView } from './components/FormsPlatesView';
@@ -43,7 +57,10 @@ type ConversationMode =
   | 'youtube'
   | 'notebooklm'
   | 'encyclopedia'
-  | 'calculator';
+  | 'calculator'
+  | 'weather'
+  | 'dailyfact'
+  | 'biography';
 
 function createInitialMessages(scenarioId: ScenarioId): ChatMessage[] {
   const scenario = SCENARIOS.find((s) => s.id === scenarioId) ?? SCENARIOS[0];
@@ -563,6 +580,39 @@ export default function App() {
       >
         {t.modeCalculator}
       </button>
+      <button
+        type="button"
+        onClick={() => setConversationMode('weather')}
+        className={`min-h-[32px] rounded-md px-3 py-1 text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap ${
+          conversationMode === 'weather'
+            ? 'bg-red-600 text-white'
+            : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'
+        }`}
+      >
+        {t.modeWeather}
+      </button>
+      <button
+        type="button"
+        onClick={() => setConversationMode('dailyfact')}
+        className={`min-h-[32px] rounded-md px-3 py-1 text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap ${
+          conversationMode === 'dailyfact'
+            ? 'bg-red-600 text-white'
+            : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'
+        }`}
+      >
+        {t.modeDailyFact}
+      </button>
+      <button
+        type="button"
+        onClick={() => setConversationMode('biography')}
+        className={`min-h-[32px] rounded-md px-3 py-1 text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap ${
+          conversationMode === 'biography'
+            ? 'bg-red-600 text-white'
+            : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'
+        }`}
+      >
+        {t.modeBiography}
+      </button>
     </div>
   );
 
@@ -690,7 +740,7 @@ export default function App() {
                   onSwitchToFreeChat={handleSwitchStoryToChat}
                   modeSwitcher={modeSwitcher}
                 />
-              ) : (
+              ) : conversationMode === 'calculator' ? (
                 <TInspireCasPanel
                   activeForm={activeForm}
                   activePlate={activePlate}
@@ -701,6 +751,45 @@ export default function App() {
                   }
                   isExpanded={calculatorExpanded}
                   onToggleExpand={() => setCalculatorExpanded((v) => !v)}
+                  onApplyCharacterState={handleApplyStoryState}
+                  onSwitchToFreeChat={handleSwitchStoryToChat}
+                  modeSwitcher={modeSwitcher}
+                />
+              ) : conversationMode === 'weather' ? (
+                <WeatherForecastPanel
+                  activeForm={activeForm}
+                  activePlate={activePlate}
+                  activeTera={activeTera}
+                  activePhase={activePhase}
+                  localTimeDisplay={
+                    timeSyncMode === 'auto' ? localTimeDisplay : phaseInfo.windowLabel
+                  }
+                  onApplyCharacterState={handleApplyStoryState}
+                  onSwitchToFreeChat={handleSwitchStoryToChat}
+                  modeSwitcher={modeSwitcher}
+                />
+              ) : conversationMode === 'dailyfact' ? (
+                <DailyFactPanel
+                  activeForm={activeForm}
+                  activePlate={activePlate}
+                  activeTera={activeTera}
+                  activePhase={activePhase}
+                  localTimeDisplay={
+                    timeSyncMode === 'auto' ? localTimeDisplay : phaseInfo.windowLabel
+                  }
+                  onApplyCharacterState={handleApplyStoryState}
+                  onSwitchToFreeChat={handleSwitchStoryToChat}
+                  modeSwitcher={modeSwitcher}
+                />
+              ) : (
+                <BiographyPanel
+                  activeForm={activeForm}
+                  activePlate={activePlate}
+                  activeTera={activeTera}
+                  activePhase={activePhase}
+                  localTimeDisplay={
+                    timeSyncMode === 'auto' ? localTimeDisplay : phaseInfo.windowLabel
+                  }
                   onApplyCharacterState={handleApplyStoryState}
                   onSwitchToFreeChat={handleSwitchStoryToChat}
                   modeSwitcher={modeSwitcher}
@@ -887,6 +976,66 @@ export default function App() {
                   </p>
                 </div>
                 <Calculator className="h-4 w-4 shrink-0 text-[var(--accent-text)]" />
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setScenarioModalOpen(false);
+                  setConversationMode('weather');
+                  setActiveTab('chat');
+                }}
+                className="flex w-full items-center justify-between gap-3 rounded-xl border border-[var(--border-strong)] bg-[var(--bg-elevated)] p-4 text-left transition-colors hover:border-red-500/50 cursor-pointer"
+              >
+                <div>
+                  <span className="font-display text-sm font-bold text-[var(--text-primary)]">
+                    {t.weatherTitle}
+                  </span>
+                  <p className="mt-1 text-xs text-[var(--text-secondary)]">
+                    Live current weather, hourly outlook, 7-day forecast, and official public alerts with Eevee broadcasting today’s weather.
+                  </p>
+                </div>
+                <CloudSun className="h-4 w-4 shrink-0 text-[var(--accent-text)]" />
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setScenarioModalOpen(false);
+                  setConversationMode('dailyfact');
+                  setActiveTab('chat');
+                }}
+                className="flex w-full items-center justify-between gap-3 rounded-xl border border-[var(--border-strong)] bg-[var(--bg-elevated)] p-4 text-left transition-colors hover:border-red-500/50 cursor-pointer"
+              >
+                <div>
+                  <span className="font-display text-sm font-bold text-[var(--text-primary)]">
+                    {t.factTitle}
+                  </span>
+                  <p className="mt-1 text-xs text-[var(--text-secondary)]">
+                    One verified real-world hedgehog fact per calendar day—alternating daily—with Eevee’s briefing and Q&A.
+                  </p>
+                </div>
+                <Calendar className="h-4 w-4 shrink-0 text-[var(--accent-text)]" />
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setScenarioModalOpen(false);
+                  setConversationMode('biography');
+                  setActiveTab('chat');
+                }}
+                className="flex w-full items-center justify-between gap-3 rounded-xl border border-[var(--border-strong)] bg-[var(--bg-elevated)] p-4 text-left transition-colors hover:border-red-500/50 cursor-pointer"
+              >
+                <div>
+                  <span className="font-display text-sm font-bold text-[var(--text-primary)]">
+                    {t.bioTitle}
+                  </span>
+                  <p className="mt-1 text-xs text-[var(--text-secondary)]">
+                    Hear Eevee recount his human life, the blue Lokix helmet, Wally through Washington, Brave Olivine, Ash Ketchum, and his BST 9,000 reincarnation.
+                  </p>
+                </div>
+                <History className="h-4 w-4 shrink-0 text-[var(--accent-text)]" />
               </button>
 
               <button

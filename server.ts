@@ -2779,6 +2779,976 @@ Instructions:
     }
   });
 
+  const GMP_SOLUTION_ID = 'gmp_mcp_codeassist_v1_aistudio';
+
+  const checkGmpQuotaError = (status: number, bodyText: string): boolean => {
+    return (
+      status === 429 ||
+      bodyText.includes('RESOURCE_EXHAUSTED') ||
+      bodyText.toLowerCase().includes('quota')
+    );
+  };
+
+  async function generateJsonResilient<T>(
+    ai: GoogleGenAI,
+    contents: string,
+    responseSchema: Record<string, unknown>
+  ): Promise<T> {
+    const attempts: Array<{ model: string; withThinking: boolean }> = [
+      { model: 'gemini-4-hydrogen', withThinking: true },
+      { model: 'gemini-4-hydrogen', withThinking: true },
+      { model: 'gemini-3.1-flash-lite', withThinking: false },
+    ];
+    let lastError: unknown = null;
+    for (let i = 0; i < attempts.length; i++) {
+      const attempt = attempts[i];
+      try {
+        const res = await ai.models.generateContent({
+          model: attempt.model,
+          contents,
+          config: {
+            systemInstruction: CHARACTER_SYSTEM_INSTRUCTION,
+            ...(attempt.withThinking ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } } : {}),
+            responseMimeType: 'application/json',
+            responseSchema,
+          },
+        });
+        const txt = (res.text ?? '').trim();
+        if (!txt) throw new Error('Empty JSON response from Gemini');
+        return JSON.parse(txt) as T;
+      } catch (err: unknown) {
+        lastError = err;
+        const msg = err instanceof Error ? err.message : String(err);
+        const isTransient = msg.includes('503') || msg.includes('UNAVAILABLE') || msg.includes('overloaded');
+        if (!isTransient) throw err;
+        if (i < attempts.length - 1) {
+          await new Promise((r) => setTimeout(r, 450));
+        }
+      }
+    }
+    throw lastError;
+  }
+
+  app.post('/api/weather-forecast', async (req: Request, res: Response) => {
+    const geminiKey = process.env.GEMINI_API_KEY;
+    const mapsKey = process.env.VITE_GOOGLE_MAPS_API_KEY || process.env.GOOGLE_MAPS_API_KEY || '';
+    if (!geminiKey) {
+      res.status(500).json({
+        error: 'GEMINI_API_KEY is not configured on the server. Add it in Settings > Secrets.',
+      });
+      return;
+    }
+    if (!mapsKey) {
+      res.status(500).json({
+        error: 'Google Maps API key is not configured on the server.',
+      });
+      return;
+    }
+
+    const rawBody = req.body as Record<string, unknown>;
+    const locationQueryRaw =
+      typeof rawBody.locationQuery === 'string' ? rawBody.locationQuery.trim().slice(0, 200) : '';
+    const rawLat = typeof rawBody.lat === 'number' && Number.isFinite(rawBody.lat) ? rawBody.lat : null;
+    const rawLng = typeof rawBody.lng === 'number' && Number.isFinite(rawBody.lng) ? rawBody.lng : null;
+    const locationLabelInput =
+      typeof rawBody.locationLabel === 'string' ? rawBody.locationLabel.trim().slice(0, 140) : '';
+    const unitsSystem: 'IMPERIAL' | 'METRIC' =
+      rawBody.unitsSystem === 'METRIC' ? 'METRIC' : 'IMPERIAL';
+    const activeForm = typeof rawBody.activeForm === 'string' ? rawBody.activeForm : 'Eevee';
+    const activePlate = typeof rawBody.activePlate === 'string' ? rawBody.activePlate : 'None (Base)';
+    const activeTera = typeof rawBody.activeTera === 'string' ? rawBody.activeTera : 'Normal';
+    const localTime = typeof rawBody.localTime === 'string' ? rawBody.localTime : '';
+    const timePhase = typeof rawBody.timePhase === 'string' ? rawBody.timePhase : '';
+    const languageCode = typeof rawBody.languageCode === 'string' ? rawBody.languageCode : 'en-US';
+    const selectedLanguage = getLanguageByCode(languageCode);
+
+    try {
+      let latitude = rawLat;
+      let longitude = rawLng;
+      let formattedAddress = locationLabelInput;
+
+      if (latitude === null || longitude === null) {
+        const query = locationQueryRaw || 'San Francisco, CA';
+        const geocodeUrl = `https://geocode.googleapis.com/v4/geocode/address/${encodeURIComponent(query)}`;
+        const geoRes = await fetch(geocodeUrl, {
+          method: 'GET',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Goog-Api-Key': mapsKey,
+            'X-Goog-FieldMask': 'results.placeId,results.location,results.formattedAddress',
+            'X-Goog-Maps-Solution-ID': GMP_SOLUTION_ID,
+          },
+        });
+        const geoText = await geoRes.text();
+        if (!geoRes.ok) {
+          if (checkGmpQuotaError(geoRes.status, geoText)) {
+            res.status(429).json({
+              error: 'Google Maps Platform Geocoding quota exceeded.',
+              quotaExceeded: true,
+            });
+            return;
+          }
+          res.status(geoRes.status).json({
+            error: `Geocoding request failed (${geoRes.status}). Check the location query.`,
+          });
+          return;
+        }
+        const geoJson = JSON.parse(geoText) as {
+          results?: Array<{
+            formattedAddress?: string;
+            location?: { latitude?: number; longitude?: number };
+          }>;
+        };
+        const topResult = geoJson.results?.[0];
+        if (
+          !topResult?.location ||
+          typeof topResult.location.latitude !== 'number' ||
+          typeof topResult.location.longitude !== 'number'
+        ) {
+          res.status(404).json({
+            error: `Could not locate "${query}". Try a city name, ZIP code, or street address.`,
+          });
+          return;
+        }
+        latitude = topResult.location.latitude;
+        longitude = topResult.location.longitude;
+        formattedAddress = topResult.formattedAddress || query;
+      } else if (!formattedAddress) {
+        formattedAddress = `${latitude.toFixed(3)}, ${longitude.toFixed(3)}`;
+      }
+
+      const buildWeatherUrl = (
+        endpoint: string,
+        extraParams: Record<string, string> = {}
+      ): string => {
+        const u = new URL(`https://weather.googleapis.com/v1/${endpoint}`);
+        u.searchParams.set('key', mapsKey);
+        u.searchParams.set('location.latitude', String(latitude));
+        u.searchParams.set('location.longitude', String(longitude));
+        for (const [k, v] of Object.entries(extraParams)) {
+          u.searchParams.set(k, v);
+        }
+        return u.toString();
+      };
+
+      const gmpHeaders = { 'X-Goog-Maps-Solution-ID': GMP_SOLUTION_ID };
+      const alertLang = (selectedLanguage.bcp47 || 'en').split('-')[0] || 'en';
+
+      const [currentRes, hourlyRes, dailyRes, alertsRes] = await Promise.all([
+        fetch(buildWeatherUrl('currentConditions:lookup', { unitsSystem }), {
+          headers: gmpHeaders,
+        }),
+        fetch(
+          buildWeatherUrl('forecast/hours:lookup', {
+            hours: '24',
+            pageSize: '24',
+            unitsSystem,
+          }),
+          { headers: gmpHeaders }
+        ),
+        fetch(
+          buildWeatherUrl('forecast/days:lookup', {
+            days: '7',
+            pageSize: '7',
+            unitsSystem,
+          }),
+          { headers: gmpHeaders }
+        ),
+        fetch(
+          buildWeatherUrl('publicAlerts:lookup', {
+            languageCode: alertLang,
+          }),
+          { headers: gmpHeaders }
+        ),
+      ]);
+
+      const [currentText, hourlyText, dailyText, alertsText] = await Promise.all([
+        currentRes.text(),
+        hourlyRes.text(),
+        dailyRes.text(),
+        alertsRes.text(),
+      ]);
+
+      for (const [resItem, txt, label] of [
+        [currentRes, currentText, 'current conditions'],
+        [hourlyRes, hourlyText, 'hourly forecast'],
+        [dailyRes, dailyText, 'daily forecast'],
+      ] as Array<[globalThis.Response, string, string]>) {
+        if (!resItem.ok) {
+          if (checkGmpQuotaError(resItem.status, txt)) {
+            res.status(429).json({
+              error: `Google Maps Platform Weather quota exceeded (${label}).`,
+              quotaExceeded: true,
+            });
+            return;
+          }
+          res.status(resItem.status === 404 ? 404 : 502).json({
+            error: `Weather ${label} unavailable for this location (status ${resItem.status}).`,
+          });
+          return;
+        }
+      }
+
+      // Alerts endpoint can occasionally return non-200 for unsupported oceans/remote coordinates; check quota first, otherwise fallback empty
+      let rawAlerts: Array<Record<string, unknown>> = [];
+      if (alertsRes.ok) {
+        const parsedAlerts = JSON.parse(alertsText) as {
+          weatherAlerts?: Array<Record<string, unknown>>;
+        };
+        rawAlerts = Array.isArray(parsedAlerts.weatherAlerts) ? parsedAlerts.weatherAlerts : [];
+      } else if (checkGmpQuotaError(alertsRes.status, alertsText)) {
+        res.status(429).json({
+          error: 'Google Maps Platform Weather Alerts quota exceeded.',
+          quotaExceeded: true,
+        });
+        return;
+      }
+
+      const currentJson = JSON.parse(currentText) as Record<string, unknown>;
+      const hourlyJson = JSON.parse(hourlyText) as {
+        forecastHours?: Array<Record<string, unknown>>;
+      };
+      const dailyJson = JSON.parse(dailyText) as {
+        forecastDays?: Array<Record<string, unknown>>;
+      };
+
+      const num = (v: unknown, fallback = 0): number =>
+        typeof v === 'number' && Number.isFinite(v) ? v : fallback;
+      const str = (v: unknown, fallback = ''): string =>
+        typeof v === 'string' ? v : fallback;
+      const rec = (v: unknown): Record<string, unknown> =>
+        v && typeof v === 'object' ? (v as Record<string, unknown>) : {};
+
+      const curCond = rec(currentJson.weatherCondition);
+      const curTemp = rec(currentJson.temperature);
+      const curFeels = rec(currentJson.feelsLikeTemperature);
+      const curPrecip = rec(currentJson.precipitation);
+      const curPrecipProb = rec(curPrecip.probability);
+      const curPrecipQpf = rec(curPrecip.qpf);
+      const curWind = rec(currentJson.wind);
+      const curWindDir = rec(curWind.direction);
+      const curWindSpeed = rec(curWind.speed);
+      const curWindGust = rec(curWind.gust);
+      const curVis = rec(currentJson.visibility);
+      const curPress = rec(currentJson.airPressure);
+      const curHist = rec(currentJson.currentConditionsHistory);
+      const curMax24 = rec(curHist.maxTemperature);
+      const curMin24 = rec(curHist.minTemperature);
+      const curTz = rec(currentJson.timeZone);
+
+      const normalizedCurrent = {
+        currentTime: str(currentJson.currentTime),
+        timeZoneId: str(curTz.id),
+        isDaytime: Boolean(currentJson.isDaytime),
+        conditionType: str(curCond.type, 'UNKNOWN'),
+        conditionText: str(rec(curCond.description).text, 'Unknown'),
+        iconBaseUri: str(curCond.iconBaseUri),
+        temp: Math.round(num(curTemp.degrees) * 10) / 10,
+        feelsLike: Math.round(num(curFeels.degrees) * 10) / 10,
+        tempUnit: unitsSystem === 'METRIC' ? '°C' : '°F',
+        humidity: Math.round(num(currentJson.relativeHumidity)),
+        uvIndex: Math.round(num(currentJson.uvIndex)),
+        precipPercent: Math.round(num(curPrecipProb.percent)),
+        precipType: str(curPrecipProb.type, 'RAIN'),
+        precipQuantity: Math.round(num(curPrecipQpf.quantity) * 100) / 100,
+        precipUnit: unitsSystem === 'METRIC' ? 'mm' : 'in',
+        thunderstormProbability: Math.round(num(currentJson.thunderstormProbability)),
+        pressureMb: Math.round(num(curPress.meanSeaLevelMillibars)),
+        windSpeed: Math.round(num(curWindSpeed.value)),
+        windGust: Math.round(num(curWindGust.value)),
+        windUnit: unitsSystem === 'METRIC' ? 'km/h' : 'mph',
+        windCardinal: str(curWindDir.cardinal).replace(/_/g, ' '),
+        visibility: Math.round(num(curVis.distance) * 10) / 10,
+        visibilityUnit: unitsSystem === 'METRIC' ? 'km' : 'mi',
+        cloudCover: Math.round(num(currentJson.cloudCover)),
+        max24h:
+          typeof curMax24.degrees === 'number' ? Math.round(curMax24.degrees * 10) / 10 : null,
+        min24h:
+          typeof curMin24.degrees === 'number' ? Math.round(curMin24.degrees * 10) / 10 : null,
+      };
+
+      const rawHours = Array.isArray(hourlyJson.forecastHours) ? hourlyJson.forecastHours : [];
+      const normalizedHourly = rawHours.slice(0, 12).map((h) => {
+        const dt = rec(h.displayDateTime);
+        const hr = typeof dt.hours === 'number' ? dt.hours : 0;
+        const cond = rec(h.weatherCondition);
+        const precip = rec(rec(h.precipitation).probability);
+        const wind = rec(rec(h.wind).speed);
+        const periodLabel =
+          hr === 0 ? '12 AM' : hr < 12 ? `${hr} AM` : hr === 12 ? '12 PM' : `${hr - 12} PM`;
+        return {
+          timeLabel: periodLabel,
+          hour24: hr,
+          isDaytime: Boolean(h.isDaytime),
+          temp: Math.round(num(rec(h.temperature).degrees)),
+          feelsLike: Math.round(num(rec(h.feelsLikeTemperature).degrees)),
+          conditionText: str(rec(cond.description).text, '—'),
+          conditionType: str(cond.type),
+          iconBaseUri: str(cond.iconBaseUri),
+          precipPercent: Math.round(num(precip.percent)),
+          precipType: str(precip.type, 'RAIN'),
+          windSpeed: Math.round(num(wind.value)),
+          windUnit: unitsSystem === 'METRIC' ? 'km/h' : 'mph',
+        };
+      });
+
+      const rawDays = Array.isArray(dailyJson.forecastDays) ? dailyJson.forecastDays : [];
+      const normalizedDaily = rawDays.slice(0, 7).map((d, idx) => {
+        const dd = rec(d.displayDate);
+        const year = num(dd.year, 2026);
+        const month = num(dd.month, 1);
+        const day = num(dd.day, 1);
+        const jsDate = new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
+        const weekdayLabel =
+          idx === 0
+            ? 'Today'
+            : jsDate.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'UTC' });
+        const dateLabel = jsDate.toLocaleDateString('en-US', {
+          month: 'short',
+          day: 'numeric',
+          timeZone: 'UTC',
+        });
+        const dayPart = rec(d.daytimeForecast);
+        const nightPart = rec(d.nighttimeForecast);
+        const dayCond = rec(dayPart.weatherCondition);
+        const nightCond = rec(nightPart.weatherCondition);
+        const sun = rec(d.sunEvents);
+        const moon = rec(d.moonEvents);
+        return {
+          dateLabel,
+          weekdayLabel,
+          maxTemp: Math.round(num(rec(d.maxTemperature).degrees)),
+          minTemp: Math.round(num(rec(d.minTemperature).degrees)),
+          dayConditionText: str(rec(dayCond.description).text, '—'),
+          dayConditionType: str(dayCond.type),
+          dayIconBaseUri: str(dayCond.iconBaseUri),
+          nightConditionText: str(rec(nightCond.description).text, '—'),
+          dayPrecipPercent: Math.round(num(rec(rec(dayPart.precipitation).probability).percent)),
+          nightPrecipPercent: Math.round(num(rec(rec(nightPart.precipitation).probability).percent)),
+          dayWindSpeed: Math.round(num(rec(rec(dayPart.wind).speed).value)),
+          uvIndex: Math.round(num(dayPart.uvIndex)),
+          sunriseTime: str(sun.sunriseTime),
+          sunsetTime: str(sun.sunsetTime),
+          moonPhase: str(moon.moonPhase).replace(/_/g, ' '),
+        };
+      });
+
+      const normalizedAlerts = rawAlerts.map((a) => {
+        const ds = rec(a.dataSource);
+        const titleObj = rec(a.alertTitle);
+        const recs = Array.isArray(a.safetyRecommendations)
+          ? a.safetyRecommendations.map((r) => ({
+              directive: str(rec(r).directive),
+              subtext: str(rec(r).subtext),
+            }))
+          : [];
+        return {
+          alertId: str(a.alertId, `alert-${Math.random().toString(36).slice(2)}`),
+          title: str(titleObj.text, str(a.eventType, 'Weather Alert')),
+          eventType: str(a.eventType, 'WEATHER_ALERT'),
+          areaName: str(a.areaName),
+          severity: str(a.severity, 'UNKNOWN'),
+          urgency: str(a.urgency, 'UNKNOWN'),
+          certainty: str(a.certainty, 'UNKNOWN'),
+          description: str(a.description),
+          instruction: Array.isArray(a.instruction)
+            ? a.instruction.filter((x): x is string => typeof x === 'string')
+            : [],
+          safetyRecommendations: recs,
+          startTime: str(a.startTime),
+          expirationTime: str(a.expirationTime),
+          dataSource: {
+            publisher: str(ds.publisher),
+            name: str(ds.name, 'Official Meteorological Authority'),
+            authorityUri: str(ds.authorityUri, 'https://www.weather.gov/'),
+          },
+        };
+      });
+
+      const weatherSummaryForAi = {
+        location: formattedAddress,
+        timeZoneId: normalizedCurrent.timeZoneId,
+        current: normalizedCurrent,
+        nextHours: normalizedHourly.slice(0, 8),
+        todayAndWeek: normalizedDaily.slice(0, 4),
+        activeAlerts: normalizedAlerts.map((a) => ({
+          title: a.title,
+          severity: a.severity,
+          areaName: a.areaName,
+          source: a.dataSource.name,
+        })),
+      };
+
+      const ai = new GoogleGenAI({
+        apiKey: geminiKey,
+        httpOptions: {
+          headers: {
+            'User-Agent': 'aistudio-build',
+          },
+        },
+      });
+
+      const prompt = `Your Owner opened the Weather Station and wants YOU to forecast today's weather for them based strictly on live meteorological telemetry.
+
+Current Character State: Form=${activeForm}, Arceus Plate=${activePlate}, Tera=${activeTera}${
+        localTime ? `, Owner Local Time=${localTime}${timePhase ? ` (${timePhase})` : ''}` : ''
+      }.
+Output Language: ${selectedLanguage.label} (${selectedLanguage.nativeName}) — ${selectedLanguage.aiDirective}
+
+Live Weather Telemetry (JSON):
+${JSON.stringify(weatherSummaryForAi, null, 2)}
+
+Instructions:
+1. Deliver "forecastMonologue" in ${selectedLanguage.label}: 3–5 sentences completely in-character as The Anomalous Eevee broadcasting today's weather forecast for your Owner, blending *italicized physical cues* and deadpan "spoken forecast" referencing exact temperatures, sky condition, rain/storm chances, wind, UV, or active weather alerts above.
+2. Deliver "hourlyOutlook" in ${selectedLanguage.label}: 1–2 concise sentences predicting how today evolves over the next several hours (evening drop, rain window, clear patrol window, etc.).
+3. Deliver "tacticalAdvice" as an array of 3 crisp recommendations in ${selectedLanguage.label} (e.g., coat/umbrella check, outdoor patrol verdict, dinner/indoor comfort demand).
+4. Optionally shift activeForm, activePlate, or activeTera to match the weather (e.g., Flareon/Flame Plate for cold/snow, Vaporeon/Splash Plate for rain, Jolteon/Zap Plate for thunderstorms, Glaceon/Icicle Plate for freezing temps, Leafeon/Meadow Plate for clear spring/mild days, Umbreon/Dread Plate for dark/stormy/night) or keep current state if fitting. Keep enum strings in canonical English.`;
+
+      let parsedAi: {
+        forecastMonologue?: string;
+        hourlyOutlook?: string;
+        tacticalAdvice?: string[];
+        activeForm?: string;
+        activePlate?: string;
+        activeTera?: string;
+        expression?: string;
+        moveUsed?: string | null;
+      } = {};
+
+      try {
+        parsedAi = await generateJsonResilient(ai, prompt, {
+          type: Type.OBJECT,
+          properties: {
+            forecastMonologue: { type: Type.STRING },
+            hourlyOutlook: { type: Type.STRING },
+            tacticalAdvice: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING },
+            },
+            activeForm: {
+              type: Type.STRING,
+              enum: [...VALID_FORMS],
+            },
+            activePlate: {
+              type: Type.STRING,
+              enum: [...VALID_PLATES],
+            },
+            activeTera: { type: Type.STRING },
+            expression: {
+              type: Type.STRING,
+              enum: [...VALID_EXPRESSIONS],
+            },
+            moveUsed: {
+              type: Type.STRING,
+              nullable: true,
+            },
+          },
+          required: [
+            'forecastMonologue',
+            'hourlyOutlook',
+            'tacticalAdvice',
+            'activeForm',
+            'activePlate',
+            'activeTera',
+            'expression',
+          ],
+        });
+      } catch (aiErr) {
+        console.warn('Weather AI commentary unavailable, returning live telemetry fallback:', aiErr);
+      }
+
+      const fallbackWeatherForm = (): { form: string; plate: string; tera: string } => {
+        const cond = normalizedCurrent.conditionType.toUpperCase();
+        if (normalizedCurrent.thunderstormProbability >= 35 || cond.includes('THUNDER')) {
+          return { form: 'Jolteon', plate: 'Zap Plate', tera: 'Electric' };
+        }
+        if (normalizedCurrent.precipPercent >= 45 || cond.includes('RAIN') || cond.includes('DRIZZLE') || cond.includes('SHOWER')) {
+          return { form: 'Vaporeon', plate: 'Splash Plate', tera: 'Water' };
+        }
+        if (cond.includes('SNOW') || cond.includes('ICE') || cond.includes('SLEET') || (unitsSystem === 'IMPERIAL' ? normalizedCurrent.temp <= 36 : normalizedCurrent.temp <= 2)) {
+          return { form: 'Glaceon', plate: 'Icicle Plate', tera: 'Ice' };
+        }
+        if (unitsSystem === 'IMPERIAL' ? normalizedCurrent.temp >= 85 : normalizedCurrent.temp >= 29) {
+          return { form: 'Flareon', plate: 'Flame Plate', tera: 'Fire' };
+        }
+        if (!normalizedCurrent.isDaytime) {
+          return { form: 'Umbreon', plate: 'Dread Plate', tera: 'Dark' };
+        }
+        return { form: activeForm, plate: activePlate, tera: activeTera };
+      };
+      const fb = fallbackWeatherForm();
+      const todayDay = normalizedDaily[0];
+
+      res.json({
+        location: {
+          label: formattedAddress,
+          latitude,
+          longitude,
+          timeZoneId: normalizedCurrent.timeZoneId,
+        },
+        unitsSystem,
+        current: normalizedCurrent,
+        hourly: normalizedHourly,
+        daily: normalizedDaily,
+        alerts: normalizedAlerts,
+        eeveeForecast: {
+          forecastMonologue:
+            parsedAi.forecastMonologue ||
+            `*Narrows glowing neon-red eyes toward the horizon.* "Live telemetry for ${formattedAddress}: ${normalizedCurrent.temp}${normalizedCurrent.tempUnit} (feels like ${normalizedCurrent.feelsLike}${normalizedCurrent.tempUnit}) under ${normalizedCurrent.conditionText} skies. Precipitation chance sits at ${normalizedCurrent.precipPercent}% with ${normalizedCurrent.windSpeed} ${normalizedCurrent.windUnit} winds${normalizedAlerts.length > 0 ? `—and there is an active ${normalizedAlerts[0].title} alert you had better read.` : '—manageable enough if you actually pay attention.'}"`,
+          hourlyOutlook:
+            parsedAi.hourlyOutlook ||
+            (todayDay
+              ? `Today ranges between ${todayDay.minTemp}${normalizedCurrent.tempUnit} and ${todayDay.maxTemp}${normalizedCurrent.tempUnit} with ${todayDay.dayPrecipPercent}% daytime rain risk.`
+              : ''),
+          tacticalAdvice:
+            Array.isArray(parsedAi.tacticalAdvice) && parsedAi.tacticalAdvice.length > 0
+              ? parsedAi.tacticalAdvice.slice(0, 4)
+              : [
+                  normalizedCurrent.precipPercent >= 40
+                    ? `Pack waterproof gear—precipitation probability is ${normalizedCurrent.precipPercent}%.`
+                    : `Sky cover is ${normalizedCurrent.cloudCover}% with ${normalizedCurrent.visibility} ${normalizedCurrent.visibilityUnit} visibility.`,
+                  `Wind reads ${normalizedCurrent.windSpeed} ${normalizedCurrent.windUnit}${normalizedCurrent.windCardinal ? ` (${normalizedCurrent.windCardinal})` : ''}; dress for ${normalizedCurrent.feelsLike}${normalizedCurrent.tempUnit}.`,
+                  `Keep my dinner schedule unaffected regardless of barometric pressure (${normalizedCurrent.pressureMb} mb).`,
+                ],
+          activeForm: VALID_FORMS.includes(parsedAi.activeForm as (typeof VALID_FORMS)[number])
+            ? parsedAi.activeForm
+            : fb.form,
+          activePlate: VALID_PLATES.includes(parsedAi.activePlate as (typeof VALID_PLATES)[number])
+            ? parsedAi.activePlate
+            : fb.plate,
+          activeTera: parsedAi.activeTera || fb.tera,
+          expression: VALID_EXPRESSIONS.includes(
+            parsedAi.expression as (typeof VALID_EXPRESSIONS)[number]
+          )
+            ? parsedAi.expression
+            : 'Stern',
+          moveUsed: parsedAi.moveUsed || null,
+        },
+      });
+    } catch (err: unknown) {
+      const message =
+        err instanceof Error ? err.message : 'Unexpected server error fetching weather forecast.';
+      console.error('Weather forecast error:', err);
+      const isQuota =
+        message.includes('429') ||
+        message.includes('RESOURCE_EXHAUSTED') ||
+        message.toLowerCase().includes('quota');
+      res.status(isQuota ? 429 : 500).json({
+        error: message,
+        ...(isQuota ? { quotaExceeded: true } : {}),
+      });
+    }
+  });
+
+  app.post('/api/weather-qa', async (req: Request, res: Response) => {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      res.status(500).json({
+        error: 'GEMINI_API_KEY is not configured on the server. Add it in Settings > Secrets.',
+      });
+      return;
+    }
+
+    const rawBody = req.body as Record<string, unknown>;
+    const question =
+      typeof rawBody.question === 'string' ? rawBody.question.trim().slice(0, 600) : '';
+    const weatherContext =
+      rawBody.weatherContext && typeof rawBody.weatherContext === 'object'
+        ? rawBody.weatherContext
+        : {};
+    const activeForm = typeof rawBody.activeForm === 'string' ? rawBody.activeForm : 'Eevee';
+    const activePlate = typeof rawBody.activePlate === 'string' ? rawBody.activePlate : 'None (Base)';
+    const activeTera = typeof rawBody.activeTera === 'string' ? rawBody.activeTera : 'Normal';
+    const localTime = typeof rawBody.localTime === 'string' ? rawBody.localTime : '';
+    const timePhase = typeof rawBody.timePhase === 'string' ? rawBody.timePhase : '';
+    const languageCode = typeof rawBody.languageCode === 'string' ? rawBody.languageCode : 'en-US';
+    const selectedLanguage = getLanguageByCode(languageCode);
+
+    if (!question) {
+      res.status(400).json({ error: 'Question is required.' });
+      return;
+    }
+
+    const ai = new GoogleGenAI({
+      apiKey,
+      httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+    });
+
+    const prompt = `Your Owner is asking a follow-up question about today's live weather forecast.
+Current Character State: Form=${activeForm}, Arceus Plate=${activePlate}, Tera=${activeTera}${
+      localTime ? `, Local Time=${localTime}${timePhase ? ` (${timePhase})` : ''}` : ''
+    }.
+Output Language: ${selectedLanguage.label} (${selectedLanguage.nativeName}) — ${selectedLanguage.aiDirective}
+
+Live Weather Data:
+${JSON.stringify(weatherContext, null, 2)}
+
+Owner's Question: "${question}"
+
+Answer concisely (2–4 sentences) in ${selectedLanguage.label} as The Anomalous Eevee, citing the exact live weather numbers/times above. Keep enum strings in canonical English.`;
+
+    try {
+      const parsed = await generateJsonResilient<{
+        reply: string;
+        activeForm: string;
+        activePlate: string;
+        activeTera: string;
+        expression: string;
+        moveUsed?: string | null;
+      }>(ai, prompt, {
+        type: Type.OBJECT,
+        properties: {
+          reply: { type: Type.STRING },
+          activeForm: { type: Type.STRING, enum: [...VALID_FORMS] },
+          activePlate: { type: Type.STRING, enum: [...VALID_PLATES] },
+          activeTera: { type: Type.STRING },
+          expression: { type: Type.STRING, enum: [...VALID_EXPRESSIONS] },
+          moveUsed: { type: Type.STRING, nullable: true },
+        },
+        required: ['reply', 'activeForm', 'activePlate', 'activeTera', 'expression'],
+      });
+
+      res.json({
+        reply: parsed.reply,
+        activeForm: VALID_FORMS.includes(parsed.activeForm as (typeof VALID_FORMS)[number])
+          ? parsed.activeForm
+          : activeForm,
+        activePlate: VALID_PLATES.includes(parsed.activePlate as (typeof VALID_PLATES)[number])
+          ? parsed.activePlate
+          : activePlate,
+        activeTera: parsed.activeTera || activeTera,
+        expression: VALID_EXPRESSIONS.includes(parsed.expression as (typeof VALID_EXPRESSIONS)[number])
+          ? parsed.expression
+          : 'Judging You',
+        moveUsed: parsed.moveUsed || null,
+      });
+    } catch (err: unknown) {
+      const message =
+        err instanceof Error ? err.message : 'Unexpected server error answering weather question.';
+      res.status(500).json({ error: message });
+    }
+  });
+
+  app.post('/api/daily-fact-commentary', async (req: Request, res: Response) => {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      res.status(500).json({
+        error: 'GEMINI_API_KEY is not configured on the server. Add it in Settings > Secrets.',
+      });
+      return;
+    }
+
+    const rawBody = req.body as Record<string, unknown>;
+    const dateKey = typeof rawBody.dateKey === 'string' ? rawBody.dateKey.slice(0, 32) : '';
+    const factId = typeof rawBody.factId === 'string' ? rawBody.factId.slice(0, 32) : '';
+    const title = typeof rawBody.title === 'string' ? rawBody.title.slice(0, 200) : '';
+    const speciesFocus =
+      typeof rawBody.speciesFocus === 'string' ? rawBody.speciesFocus.slice(0, 200) : '';
+    const category = typeof rawBody.category === 'string' ? rawBody.category.slice(0, 100) : '';
+    const fact = typeof rawBody.fact === 'string' ? rawBody.fact.slice(0, 1500) : '';
+    const scientificNote =
+      typeof rawBody.scientificNote === 'string' ? rawBody.scientificNote.slice(0, 1500) : '';
+    const eeveeTriggerHint =
+      typeof rawBody.eeveeTriggerHint === 'string' ? rawBody.eeveeTriggerHint.slice(0, 400) : '';
+    const question =
+      typeof rawBody.question === 'string' ? rawBody.question.trim().slice(0, 600) : '';
+    const priorCommentary =
+      typeof rawBody.priorCommentary === 'string' ? rawBody.priorCommentary.slice(0, 1500) : '';
+
+    const activeForm = typeof rawBody.activeForm === 'string' ? rawBody.activeForm : 'Eevee';
+    const activePlate = typeof rawBody.activePlate === 'string' ? rawBody.activePlate : 'None (Base)';
+    const activeTera = typeof rawBody.activeTera === 'string' ? rawBody.activeTera : 'Normal';
+    const localTime = typeof rawBody.localTime === 'string' ? rawBody.localTime : '';
+    const timePhase = typeof rawBody.timePhase === 'string' ? rawBody.timePhase : '';
+    const languageCode = typeof rawBody.languageCode === 'string' ? rawBody.languageCode : 'en-US';
+    const selectedLanguage = getLanguageByCode(languageCode);
+
+    if (!title || !fact) {
+      res.status(400).json({ error: 'Daily hedgehog fact title and body are required.' });
+      return;
+    }
+
+    const ai = new GoogleGenAI({
+      apiKey,
+      httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+    });
+
+    const prompt = question
+      ? `Your Owner is asking a follow-up question about TODAY'S real-world hedgehog fact (${dateKey}, ${factId}).
+
+Current Character State: Form=${activeForm}, Arceus Plate=${activePlate}, Tera=${activeTera}${
+          localTime ? `, Local Time=${localTime}${timePhase ? ` (${timePhase})` : ''}` : ''
+        }.
+Output Language: ${selectedLanguage.label} (${selectedLanguage.nativeName}) — ${selectedLanguage.aiDirective}
+
+Today's Hedgehog Fact:
+- Title: ${title}
+- Species: ${speciesFocus}
+- Category: ${category}
+- Fact: ${fact}
+- Scientific Note: ${scientificNote}
+${priorCommentary ? `- Your Initial Remarks: ${priorCommentary}` : ''}
+
+Owner's Question: "${question}"
+
+Instructions:
+1. Answer completely in-character as The Anomalous Eevee in ${selectedLanguage.label} (2–5 sentences), blending *italicized cues* and spoken dialogue.
+2. Keep every biological claim strictly accurate to real-world hedgehogs (Erinaceinae)—never invent fake hedgehog biology or conflate hedgehogs with porcupines/echidnas.
+3. Also provide a 1-sentence "takeaway" summarizing the biological point.`
+      : `Your Owner opened Today's Daily Fact (${dateKey}). Every single day features strictly ONE verified real-world scientific fact solely about real-world hedgehogs (Erinaceinae), alternating each day. Present and react to today's fact for your Owner!
+
+Current Character State: Form=${activeForm}, Arceus Plate=${activePlate}, Tera=${activeTera}${
+          localTime ? `, Local Time=${localTime}${timePhase ? ` (${timePhase})` : ''}` : ''
+        }.
+Output Language: ${selectedLanguage.label} (${selectedLanguage.nativeName}) — ${selectedLanguage.aiDirective}
+
+Today's Hedgehog Fact (${factId}):
+- Title: ${title}
+- Species: ${speciesFocus}
+- Category: ${category}
+- Fact: ${fact}
+- Scientific Note: ${scientificNote}
+- Angle Hint: ${eeveeTriggerHint}
+
+Instructions:
+1. Write "commentary" in ${selectedLanguage.label} completely in-character as The Anomalous Eevee (3–5 sentences): present/discuss today's real-world hedgehog fact for your Owner, comparing real-world hedgehog biology (neutrally, accurately) with your own combat standards, Pin Missile/Iron Defense skepticism, or household disdain—while grudgingly respecting effective real-world survival mechanics.
+2. Write "takeaway" in ${selectedLanguage.label}: 1 crisp biological takeaway sentence grounded strictly in real-world hedgehog science.
+3. Keep enum fields (activeForm, activePlate, activeTera, expression, moveUsed) in canonical English.`;
+
+    try {
+      const parsed = await generateJsonResilient<{
+        commentary: string;
+        takeaway: string;
+        activeForm: string;
+        activePlate: string;
+        activeTera: string;
+        expression: string;
+        moveUsed?: string | null;
+      }>(ai, prompt, {
+        type: Type.OBJECT,
+        properties: {
+          commentary: { type: Type.STRING },
+          takeaway: { type: Type.STRING },
+          activeForm: { type: Type.STRING, enum: [...VALID_FORMS] },
+          activePlate: { type: Type.STRING, enum: [...VALID_PLATES] },
+          activeTera: { type: Type.STRING },
+          expression: { type: Type.STRING, enum: [...VALID_EXPRESSIONS] },
+          moveUsed: { type: Type.STRING, nullable: true },
+        },
+        required: [
+          'commentary',
+          'takeaway',
+          'activeForm',
+          'activePlate',
+          'activeTera',
+          'expression',
+        ],
+      });
+
+      res.json({
+        commentary: parsed.commentary,
+        takeaway: parsed.takeaway || scientificNote,
+        activeForm: VALID_FORMS.includes(parsed.activeForm as (typeof VALID_FORMS)[number])
+          ? parsed.activeForm
+          : activeForm,
+        activePlate: VALID_PLATES.includes(parsed.activePlate as (typeof VALID_PLATES)[number])
+          ? parsed.activePlate
+          : activePlate,
+        activeTera: parsed.activeTera || activeTera,
+        expression: VALID_EXPRESSIONS.includes(parsed.expression as (typeof VALID_EXPRESSIONS)[number])
+          ? parsed.expression
+          : 'Judging You',
+        moveUsed: parsed.moveUsed || null,
+        isFallback: false,
+      });
+    } catch (err: unknown) {
+      const message =
+        err instanceof Error ? err.message : 'Unexpected server error generating daily hedgehog commentary.';
+      const isTransient =
+        message.includes('503') || message.includes('UNAVAILABLE') || message.includes('overloaded');
+      if (isTransient && !question) {
+        res.json({
+          commentary: `*Scowls down at today's ${dateKey} dossier on ${speciesFocus || 'hedgehogs'}, tail flicking once.* "${title}. ${fact} Compared to a real combat movepool it is purely defensive biology, yet I will admit real-world hedgehogs engineer survival efficiently."`,
+          takeaway: scientificNote || fact,
+          activeForm,
+          activePlate,
+          activeTera,
+          expression: 'Judging You',
+          moveUsed: null,
+          isFallback: true,
+        });
+        return;
+      }
+      res.status(isTransient ? 503 : 500).json({
+        error: isTransient
+          ? 'The Gemini model is experiencing temporary high demand. Click Send to ask again in a moment.'
+          : message,
+      });
+    }
+  });
+
+  app.post('/api/biography-narrate', async (req: Request, res: Response) => {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      res.status(500).json({
+        error: 'GEMINI_API_KEY is not configured on the server. Add it in Settings > Secrets.',
+      });
+      return;
+    }
+
+    const rawBody = req.body as Record<string, unknown>;
+    const chapterId = typeof rawBody.chapterId === 'string' ? rawBody.chapterId.slice(0, 60) : '';
+    const chapterTitle =
+      typeof rawBody.chapterTitle === 'string' ? rawBody.chapterTitle.slice(0, 200) : '';
+    const timeframe = typeof rawBody.timeframe === 'string' ? rawBody.timeframe.slice(0, 100) : '';
+    const chapterSummary =
+      typeof rawBody.chapterSummary === 'string' ? rawBody.chapterSummary.slice(0, 3000) : '';
+    const keyEvents = Array.isArray(rawBody.keyEvents)
+      ? rawBody.keyEvents.filter((x): x is string => typeof x === 'string').slice(0, 10)
+      : [];
+    const question =
+      typeof rawBody.question === 'string' ? rawBody.question.trim().slice(0, 700) : '';
+    const priorNarrative =
+      typeof rawBody.priorNarrative === 'string' ? rawBody.priorNarrative.slice(0, 2000) : '';
+
+    const activeForm = typeof rawBody.activeForm === 'string' ? rawBody.activeForm : 'Eevee';
+    const activePlate = typeof rawBody.activePlate === 'string' ? rawBody.activePlate : 'None (Base)';
+    const activeTera = typeof rawBody.activeTera === 'string' ? rawBody.activeTera : 'Normal';
+    const localTime = typeof rawBody.localTime === 'string' ? rawBody.localTime : '';
+    const timePhase = typeof rawBody.timePhase === 'string' ? rawBody.timePhase : '';
+    const languageCode = typeof rawBody.languageCode === 'string' ? rawBody.languageCode : 'en-US';
+    const selectedLanguage = getLanguageByCode(languageCode);
+
+    if (!chapterTitle || !chapterSummary) {
+      res.status(400).json({ error: 'Biography chapter details are required.' });
+      return;
+    }
+
+    const ai = new GoogleGenAI({
+      apiKey,
+      httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+    });
+
+    const canonReference = `CANONICAL BACKSTORY FACTS YOU MUST NEVER CONTRADICT:
+- Before becoming an Eevee, you were a human Trainer born November 3, 2010 into "Eevee Industries Incorporated" (a breeding enterprise founded c. 1850s still run on Windows NT Workstation 4.0 running Ditto.exe and Eevee_Production.exe).
+- From infancy you had blue-dyed hair, green eyes, white gloves, red-and-white shoes (switched to brown Nov 26, 2026), blue backpack, Eevee-cased Rotom Phone (received Nov 3, 2021 at age 11), and a skull-fused blue Lokix helmet that acted as a vital organ and prevented facial expressions for 16 years.
+- Oct 1, 2026: Started Paldea Treasure Hunt at age 16 with Quaxly (♀), caught eight male Eevees in South Province Area Two (Wally the Sassy Sylveon, Waldo the Lax Jolteon, Walter the Serious Espeon, Wallace the Sassy Flareon, William the Naughty Vaporeon, Willie the Naughty Umbreon, Wily the Timid Leafeon, Washington the Modest Glaceon), and abandoned Quaxly in a Tagtree Thicket green dumpster with a ball-and-chain and 1,000 km restraining order.
+- Oct 31, 2026: Exposed for hatching 13 Eevees in one day (11 kept males, 2 female releases) via Egg Power sandwiches.
+- Nov 1–3, 2026: Crushed Penny (Cassiopeia), called her second-fiddle, punched Arceus in the gut with >9,000 PSI, had an insufferable 1990s hipster phase, beat Team Star/Elite Four/Sada, and threw Clavell's Master Ball at a wild male Eevee.
+- Nov 3–19, 2026: Subdued Kitakami & Blueberry Academy (Carmine, Kieran, Stellar Terapagos), then swept Kalos/Lumiose (Totodile ♀), Sinnoh (Piplup ♀), Galar/Isle of Armor (Sobble ♀, Kubfu ♀), Alola (Popplio ♀), Unova (Oshawott ♀), Hoenn (Mudkip ♀), Johto (Totodile ♀ #2), and Kanto (Squirtle ♀), toppling regional Champions and consolidating Pokédex #001–#1025.
+- Nov 23–26, 2026: Taunted Penny with Dreamcast-style "GUESS WHO'S BACK?" and Eevee Rotom Phone case; wore a brown Eevee kigurumi over your still-attached blue Lokix helmet for Thanksgiving (Nov 26); and on Nov 24, 2026 the Rising Volt Tacklers' Brave Olivine collapsed from 50m over ruined Paldea, killing Liko, Roy, Dot, and Murdock's landmine-struck Lycanroc without remorse from you.
+- Final Climax & Rebirth: In an all-out duel against Ash Ketchum, catastrophic impacts shattered your skull-fused blue Lokix helmet (revealing your blue hair and green eyes for the first time). Your loyal Eevee army rescued your dying human body—the one moment you told them "I owe you all"—before your human life ended and you reincarnated into your current form: an exclusively male, shiny-locked, Level 100 Eevee with glowing neon-red slit eyes, permanent scowl, visible fangs, fluent human speech, BST 9,000 (6×3,000 in-lore stats), 45+ moves, all 18 Arceus Plates, Mega X & Y, Gigantamax, multiple Tera Types, instant switching across all 8 Eeveelutions, and Master Ball transport.`;
+
+    const prompt = question
+      ? `Your Owner is asking you directly about Chapter "${chapterTitle}" (${timeframe}, id=${chapterId}) of your life story and reincarnation as an Eevee.
+
+${canonReference}
+
+Current Character State: Form=${activeForm}, Arceus Plate=${activePlate}, Tera=${activeTera}${
+          localTime ? `, Local Time=${localTime}${timePhase ? ` (${timePhase})` : ''}` : ''
+        }.
+Output Language: ${selectedLanguage.label} (${selectedLanguage.nativeName}) — ${selectedLanguage.aiDirective}
+
+Focused Chapter Context:
+- Summary: ${chapterSummary}
+- Key Events: ${keyEvents.join(' | ')}
+${priorNarrative ? `- Your Earlier Recounting: ${priorNarrative}` : ''}
+
+Owner's Question: "${question}"
+
+Instructions:
+1. Respond in ${selectedLanguage.label} as The Anomalous Eevee (3–6 sentences): blunt, unsentimental, unapologetic, mixing *italicized physical cues* with crisp "spoken testimony" grounded in the exact canonical names, dates, and events above.
+2. Provide a 1-sentence "revelation" in ${selectedLanguage.label} capturing what that event meant for your eventual reincarnation.
+3. Keep canonical English names for enum fields.`
+      : `Your Owner asked to hear Chapter "${chapterTitle}" (${timeframe}, id=${chapterId}) of your biography—the real story of your former human life and the chain of events that led you to reincarnate as The Anomalous Eevee.
+
+${canonReference}
+
+Current Character State: Form=${activeForm}, Arceus Plate=${activePlate}, Tera=${activeTera}${
+          localTime ? `, Local Time=${localTime}${timePhase ? ` (${timePhase})` : ''}` : ''
+        }.
+Output Language: ${selectedLanguage.label} (${selectedLanguage.nativeName}) — ${selectedLanguage.aiDirective}
+
+Chapter Focus:
+- Summary: ${chapterSummary}
+- Key Events:
+${keyEvents.map((e, i) => `  ${i + 1}. ${e}`).join('\n')}
+
+Instructions:
+1. Write "narrative" in ${selectedLanguage.label} as The Anomalous Eevee speaking directly to your Owner (4–7 sentences): first-person testimony blended with *italicized physical cues*. Never soften or sanitize your past—own the Windows NT breeding computers, the blue Lokix helmet, Wally through Washington, the discarded starters, the 9,000 PSI punch, the Brave Olivine indifference, or the final duel with Ash Ketchum depending on which chapter this is—and convey why being reborn as an Eevee is the true continuation of that life.
+2. Write "revelation" in ${selectedLanguage.label}: 1 sharp closing thesis sentence connecting this chapter directly to your reincarnation as The Anomalous Eevee.
+3. Keep enum fields in canonical English.`;
+
+    try {
+      const parsed = await generateJsonResilient<{
+        narrative: string;
+        revelation: string;
+        activeForm: string;
+        activePlate: string;
+        activeTera: string;
+        expression: string;
+        moveUsed?: string | null;
+      }>(ai, prompt, {
+        type: Type.OBJECT,
+        properties: {
+          narrative: { type: Type.STRING },
+          revelation: { type: Type.STRING },
+          activeForm: { type: Type.STRING, enum: [...VALID_FORMS] },
+          activePlate: { type: Type.STRING, enum: [...VALID_PLATES] },
+          activeTera: { type: Type.STRING },
+          expression: { type: Type.STRING, enum: [...VALID_EXPRESSIONS] },
+          moveUsed: { type: Type.STRING, nullable: true },
+        },
+        required: [
+          'narrative',
+          'revelation',
+          'activeForm',
+          'activePlate',
+          'activeTera',
+          'expression',
+        ],
+      });
+
+      res.json({
+        narrative: parsed.narrative,
+        revelation: parsed.revelation || '',
+        activeForm: VALID_FORMS.includes(parsed.activeForm as (typeof VALID_FORMS)[number])
+          ? parsed.activeForm
+          : activeForm,
+        activePlate: VALID_PLATES.includes(parsed.activePlate as (typeof VALID_PLATES)[number])
+          ? parsed.activePlate
+          : activePlate,
+        activeTera: parsed.activeTera || activeTera,
+        expression: VALID_EXPRESSIONS.includes(parsed.expression as (typeof VALID_EXPRESSIONS)[number])
+          ? parsed.expression
+          : 'Stern',
+        moveUsed: parsed.moveUsed || null,
+      });
+    } catch (err: unknown) {
+      const message =
+        err instanceof Error ? err.message : 'Unexpected server error narrating biography chapter.';
+      const isTransient =
+        message.includes('503') || message.includes('UNAVAILABLE') || message.includes('overloaded');
+      if (isTransient && !question) {
+        res.json({
+          narrative: `*Stares flatly with glowing neon-red eyes, paws planted.* "You asked about ${chapterTitle} (${timeframe}). ${chapterSummary} Every detail of that era—including the blue Lokix helmet and my eight male Eeveelutions—led straight to what sits in front of you now."`,
+          revelation: keyEvents[keyEvents.length - 1] || chapterSummary,
+          activeForm,
+          activePlate,
+          activeTera,
+          expression: 'Stern',
+          moveUsed: null,
+        });
+        return;
+      }
+      res.status(isTransient ? 503 : 500).json({
+        error: isTransient
+          ? 'The Gemini model is experiencing temporary high demand. Try asking again in a moment.'
+          : message,
+      });
+    }
+  });
+
   if (!isProduction) {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
